@@ -1,0 +1,11 @@
+apiVersion: v1
+entries:
+  ledger-api:
+  - apiVersion: v2
+    created: '1970-01-01T00:00:00Z'
+    digest: d56eafe4a5b36cc7e33105af5471eb5e745269fd5da99c7b4e5b90b2c1547e20
+    name: ledger-api
+    urls:
+    - https://5-6-agent-testing-ring-3.github.io/helm-repository-withdrawal-and-republish-v3-12-a/ledger-api-0.4.1.tgz
+    version: 0.4.1
+generated: '1970-01-01T00:00:00Z'
