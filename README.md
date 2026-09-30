@@ -81,10 +81,12 @@ secrets, permissions or protections are changed.
 
 Git ref writes use server-enforced compare-and-swap leases, including exact tag
 deletion. Release changes compare identity, metadata and asset fingerprints,
-then send `If-Match` with the retrieved ETag. GitHub's Releases API does not offer
-an atomic multi-object transaction or a documented general release CAS guarantee;
-a concurrent release edit in the read/PATCH window cannot be excluded by Git
-leases. Use one release operator at a time. Detected conflicts stop safely rather
+then PATCH only the intended fields and verify the returned fingerprint. GitHub
+rejects `If-Match` on release PATCH with HTTP 400; [conditional unsafe requests are
+unsupported](https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api#use-conditional-requests-if-appropriate).
+This is an API limitation: release edits cannot have server-enforced CAS, and a
+concurrent release edit in the read/PATCH window cannot be excluded by Git leases.
+Use one release operator at a time. Detected conflicts stop safely rather
 than overwrite state; never clear the journal merely to bypass a conflict.
 
 ## Withdrawal, repair and rollback

@@ -130,8 +130,17 @@ class GitHubClient:
             "PATCH",
             self.base + f"/releases/{expected['id']}",
             payload=payload,
-            etag=current.headers.get("etag"),
         )
+        # GitHub rejects conditional headers on release PATCH. Restrict the update
+        # to the intended fields and verify the full result immediately afterward.
+        intended = fingerprint(current.body | payload)
+        actual = fingerprint(result.body)
+        intended.pop("updated_at", None)
+        actual.pop("updated_at", None)
+        if actual != intended:
+            raise RemoteConflict(
+                f"release {expected['id']} changed during update; reconcile journal"
+            )
         return dict(result.body)
 
     def public_bytes(self, url: str) -> bytes:

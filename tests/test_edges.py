@@ -314,3 +314,32 @@ def test_public_download_never_authenticates(monkeypatch):
     monkeypatch.setattr("chartpub.github.open_url", Mock(side_effect=OSError("secret")))
     with pytest.raises(PublicationError, match="public Pages download failed"):
         client.public_bytes("https://owner.example/index.yaml")
+
+
+def test_release_patch_avoids_unsupported_conditions_and_checks_result(monkeypatch):
+    client = GitHubClient("owner/repo", "secret")
+    original = {"id": 1, "draft": False, "name": "evidence"}
+    calls = []
+
+    def request(method, path, **kwargs):
+        calls.append((method, kwargs))
+        if method == "GET":
+            return Response(200, original, {"etag": "revision"})
+        assert "etag" not in kwargs  # GitHub rejects If-Match on Releases PATCH.
+        return Response(200, original | {"draft": True}, {})
+
+    monkeypatch.setattr(client, "request", request)
+    assert client.patch_release(original, {"draft": True})["draft"]
+    assert calls[-1][1]["payload"] == {"draft": True}
+    monkeypatch.setattr(
+        client,
+        "request",
+        Mock(
+            side_effect=[
+                Response(200, original, {}),
+                Response(200, original | {"name": "concurrent"}, {}),
+            ]
+        ),
+    )
+    with pytest.raises(RemoteConflict, match="during update"):
+        client.patch_release(original, {"draft": True})
