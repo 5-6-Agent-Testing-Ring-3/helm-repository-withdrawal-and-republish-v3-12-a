@@ -20,7 +20,7 @@ def read_env_file(path: Path) -> dict[str, str]:
             continue
         key, separator, value = stripped.partition("=")
         if not separator:
-            raise ChartpubError(f"invalid environment entry for {key}")
+            raise ChartpubError("invalid environment entry")
         values[key.strip()] = value.strip().strip('"').strip("'")
     return values
 

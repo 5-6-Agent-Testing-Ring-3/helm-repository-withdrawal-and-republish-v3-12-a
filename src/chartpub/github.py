@@ -5,9 +5,31 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from typing import Any
+from http.client import HTTPResponse
+from typing import Any, cast
 
-from chartpub.errors import PublicationError
+from chartpub.errors import PublicationError, RemoteConflict
+
+
+class SafeRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(
+        self, req: urllib.request.Request, fp: Any, code: int, msg: str, headers: Any, newurl: str
+    ) -> urllib.request.Request | None:
+        if not newurl.startswith("https://"):
+            raise PublicationError("refusing insecure redirect")
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if (
+            redirected
+            and urllib.parse.urlsplit(req.full_url).netloc != urllib.parse.urlsplit(newurl).netloc
+        ):
+            redirected.remove_header("Authorization")
+        return redirected
+
+
+def open_url(request: urllib.request.Request, timeout: int) -> HTTPResponse:
+    return cast(
+        HTTPResponse, urllib.request.build_opener(SafeRedirect()).open(request, timeout=timeout)
+    )
 
 
 @dataclass(frozen=True)
@@ -24,6 +46,7 @@ class GitHubClient:
         self.repository = repository
         self.token = token
         self.api_url = api_url.rstrip("/")
+        self.base = f"/repos/{repository}"
 
     def request(
         self,
@@ -31,41 +54,110 @@ class GitHubClient:
         path: str,
         *,
         payload: dict[str, Any] | None = None,
+        data: bytes | None = None,
+        binary: bool = False,
         content_type: str = "application/vnd.github+json",
+        etag: str | None = None,
     ) -> Response:
-        data = None if payload is None else json.dumps(payload).encode("utf-8")
+        url = path if path.startswith("https://") else self.api_url + path
+        if urllib.parse.urlsplit(url).netloc not in {"api.github.com", "uploads.github.com"}:
+            raise PublicationError("refusing credential delivery to unexpected host")
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": content_type,
+            "Accept": "application/octet-stream" if binary else "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        if etag:
+            headers["If-Match"] = etag
         request = urllib.request.Request(
-            f"{self.api_url}{path}",
-            data=data,
+            url,
+            data=json.dumps(payload).encode() if payload is not None else data,
             method=method,
-            headers={
-                "Accept": "application/vnd.github+json",
-                "Authorization": f"Bearer {self.token}",
-                "Content-Type": content_type,
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
+            headers=headers,
         )
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
+            with open_url(request, timeout=60) as response:
                 body = response.read()
-                decoded = json.loads(body) if body else None
-                return Response(response.status, decoded, dict(response.headers.items()))
+                return Response(
+                    response.status,
+                    body if binary else json.loads(body) if body else None,
+                    {k.lower(): v for k, v in response.headers.items()},
+                )
         except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
-            raise PublicationError(f"GitHub {method} {path} failed ({exc.code}): {body}") from exc
+            # Server bodies and URLs are intentionally omitted: they can echo credentials.
+            if exc.code == 404 and method == "GET":
+                return Response(404, None, {})
+            if exc.code in (409, 412, 422):
+                raise RemoteConflict(f"GitHub {method} conflict ({exc.code})") from None
+            raise PublicationError(f"GitHub {method} failed ({exc.code})") from None
+        except (OSError, ValueError):
+            raise PublicationError(f"GitHub {method} transport/response failure") from None
+
+    def paginate(self, path: str) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            response = self.request("GET", f"{path}?per_page=100&page={page}")
+            if response.status == 404:
+                raise PublicationError("collection not found")
+            result.extend(response.body)
+            if len(response.body) < 100:
+                return result
+            page += 1
 
     def list_releases(self) -> list[dict[str, Any]]:
-        response = self.request("GET", f"/repos/{self.repository}/releases?per_page=2")
-        return list(response.body)
+        releases = self.paginate(self.base + "/releases")
+        for release in releases:
+            release["assets"] = self.paginate(self.base + f"/releases/{release['id']}/assets")
+        return releases
 
     def get_ref(self, ref: str) -> str | None:
-        encoded = urllib.parse.quote(ref, safe="/")
-        try:
-            response = self.request("GET", f"/repos/{self.repository}/git/ref/{encoded}")
-        except PublicationError:
-            return None
-        return str(response.body["object"]["sha"])
+        response = self.request("GET", self.base + "/git/ref/" + urllib.parse.quote(ref, safe="/"))
+        return None if response.status == 404 else str(response.body["object"]["sha"])
 
-    def delete_tag(self, tag: str) -> None:
-        encoded = urllib.parse.quote(f"tags/{tag}", safe="/")
-        self.request("DELETE", f"/repos/{self.repository}/git/refs/{encoded}")
+    def release(self, release_id: int) -> Response:
+        response = self.request("GET", self.base + f"/releases/{release_id}")
+        if response.status == 404:
+            raise RemoteConflict("release disappeared")
+        return response
+
+    def patch_release(self, expected: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        current = self.release(expected["id"])
+        if fingerprint(current.body) != fingerprint(expected):
+            raise RemoteConflict(f"release {expected['id']} changed")
+        result = self.request(
+            "PATCH",
+            self.base + f"/releases/{expected['id']}",
+            payload=payload,
+            etag=current.headers.get("etag"),
+        )
+        return dict(result.body)
+
+    def public_bytes(self, url: str) -> bytes:
+        try:
+            with open_url(urllib.request.Request(url), timeout=60) as response:
+                return response.read()
+        except OSError:
+            raise PublicationError("public Pages download failed") from None
+
+    def download(self, asset_id: int) -> bytes:
+        response = self.request("GET", self.base + f"/releases/assets/{asset_id}", binary=True)
+        if response.status == 404 or not isinstance(response.body, bytes):
+            raise PublicationError("asset download failed")
+        return response.body
+
+
+def fingerprint(release: dict[str, Any]) -> dict[str, Any]:
+    result = {
+        key: release.get(key)
+        for key in ("id", "tag_name", "target_commitish", "draft", "name", "body", "updated_at")
+    }
+    result["assets"] = sorted(
+        [
+            {key: asset.get(key) for key in ("id", "name", "size", "digest", "state")}
+            for asset in release.get("assets", [])
+        ],
+        key=lambda asset: asset["id"],
+    )
+    return result

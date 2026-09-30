@@ -20,11 +20,10 @@ class Publisher:
 
     def publish(self, artifact: Artifact) -> None:
         self.state_dir.mkdir(parents=True, exist_ok=True)
-        # The current order reproduces the incident: discoverability changes
-        # before the immutable release asset has been accepted and verified.
-        self.write_pages(artifact)
-        self._write_state("pages-updated", artifact)
+        self._write_state("prepared", artifact)
         self.write_release(artifact)
+        self._write_state("release-verified", artifact)
+        self.write_pages(artifact)
         self._write_state("complete", artifact)
 
     def _write_state(self, phase: str, artifact: Artifact) -> None:

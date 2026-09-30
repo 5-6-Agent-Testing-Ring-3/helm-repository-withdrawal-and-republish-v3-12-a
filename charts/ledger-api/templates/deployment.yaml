@@ -16,7 +16,7 @@ spec:
       labels:
         app.kubernetes.io/name: {{ include "ledger-api.name" . }}
         app.kubernetes.io/instance: {{ .Release.Name }}
-        app.kubernetes.io/component: worker
+        app.kubernetes.io/component: api
     spec:
       serviceAccountName: {{ include "ledger-api.serviceAccountName" . }}
       containers:
